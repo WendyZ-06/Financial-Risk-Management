@@ -1,0 +1,857 @@
+---
+title: "Math 5320 Project"
+format: html
+editor: visual
+---
+
+### Prefix
+
+In this system, we can calculate `VaR` and `ES` for a portfolio and its underlying stocks, for its historical data, for its Monte-Carlo Simulation. We also back test our results of `VaR`, which contains the previous functions we defined.
+
+For this system, we can do calculation for a portfolio of ***multiple stocks*** and do calculation for ***multiple window sizes***!
+
+Here are some basic variables waiting for you to input...
+
+1.  stock_files \<- ???
+
+2.  option_files \<- ???
+
+    Note: `stock_files` and `option_files` must be **file paths** and in the same **Bloomberg format** as we do in class
+
+3.  date \<- ???
+
+    Note: date we created the portfolio)
+
+4.  positions \<- ???
+
+    Note: in this system, we give heavy weights to stocks only
+
+5.  investment \<- ???
+
+6.  windowSize \<- ???
+
+7.  horizon \<- ???
+
+    Note: `horizon` is days/252
+
+8.  `VaRp` \<- ???
+
+9.  `ESp`\<- ???
+
+10. ......
+
+Note: **historical data and Monte Carlo data take a Long Time to output**.
+
+### Packages
+
+```{r}
+#| warning: false
+library(dplyr)
+library(fpp3)
+library(rugarch)
+library(tidyquant)
+library(quantmod)
+library(PerformanceAnalytics)
+library(treasuryTR)
+library(tbl2xts)
+library(fExtremes)
+library(ggplot2)
+library(gridExtra)
+```
+
+### **Functions**
+
+#### Read stock and option data
+
+```{r}
+# Read stock and option data
+load_stock <- function(file_path) {
+  data <- read.csv(file_path)
+  datenums <- as.Date(data$Dates, format='%m/%d/%Y')
+  indices <- order(datenums, decreasing = TRUE)
+  data <- data[indices, ]
+  
+  # return(data.frame(date = data$Dates, prices = data$PX_LAST))
+  return(list(date = data$Dates, prices = data$PX_LAST))
+}
+
+### Suppose there is a title in the option file, same as hw10.csv
+load_option <- function(file_path) {
+  data <- read.csv(file_path, skip = 1)
+  datenums <- as.Date(data$Date, format='%m/%d/%Y')
+  indices <- order(datenums, decreasing = TRUE)
+  data <- data[indices, ]
+  
+  volatility <- data[, ncol(data)]
+  
+  # return(data.frame(date = data$Date, prices = data$PX_LAST, volatility = volatility))
+  return(list(date = data$Date, prices = data$PX_LAST, volatility = volatility))
+}
+```
+
+#### Load prices
+
+##### OUTPUT NOTE
+
+Return a list containing common dates of n stocks, n stock prices, common dates of n options, n option prices and volatility
+
+```{r}
+# Load stock price, option price, option implied volatility for future use
+# Only keep data of common dates for the stocks
+load_prices <- function(stock_files, option_files) {
+  num_stocks <- length(stock_files)
+  num_options <- length(option_files)
+  
+  stock_dates <- list()
+  option_dates <- list()
+  stock_prices <- vector("list", num_stocks)
+  option_prices <- vector("list", num_options)
+  option_volatility <- vector("list", num_options)
+
+  for (i in 1:num_stocks) {
+    stock_file <- stock_files[i]
+    stock_data <- load_stock(stock_file)
+    stock_dates[[i]] <- stock_data$date
+  }
+
+  for (i in 1:num_options) {
+    option_file <- option_files[i]
+    option_data <- load_option(option_file)
+    option_dates[[i]] <- option_data$date
+  }
+
+  # Find common date ranges for stocks and options
+  common_stock_dates <- Reduce(intersect, stock_dates)
+  common_option_dates <- Reduce(intersect, option_dates)
+
+  # Filter data to common date range for stocks
+  for (i in 1:num_stocks) {
+    stock_file <- stock_files[i]
+    stock_name <- paste0("stock", i)
+    stock_data <- load_stock(stock_file)
+    common_indices <- which(stock_data$date %in% common_stock_dates)
+    stock_prices[[i]] <- stock_data$price[common_indices]
+  }
+
+  # Filter data to common date range for options
+  for (i in 1:num_options) {
+    option_file <- option_files[i]
+    option_name <- paste0("option", i)
+    option_data <- load_option(option_file)
+    common_indices <- which(option_data$date %in% common_option_dates)
+    option_prices[[i]] <- option_data$price[common_indices]
+    option_volatility[[i]] <- option_data$volatility[common_indices]
+  }
+
+  return(list(
+    stock_dates = common_stock_dates,
+    option_dates = common_option_dates,
+    stock_prices = stock_prices,
+    option_prices = option_prices,
+    option_volatility = option_volatility
+  ))
+}
+
+```
+
+#### Form a portfolio
+
+##### OUTPUT NOTE
+
+Return a list containing portfolio date and portfolio value (each day corresponding to date)
+
+```{r}
+form_portfolio <- function(date, positions, investment, data) {
+  d <- which(data$stock_dates == date)
+  if (length(d) == 0) {
+    stop("Wrong Date (not in asset dates)!!")
+  }
+  
+  if (length(positions) > length(data$stock_prices) + length(data$option_prices)) {
+    stop("Wrong Number of Positons!!")
+  }
+  
+  if (sum(positions) != 1) {
+    stop("Wrong Positon Input!!")
+  }
+
+  n_stocks <- length(data$stock_prices)
+  shares <- numeric(n_stocks)
+  port_value <- vector("list", length(data$stock_dates))
+  port_value[] <- 0
+  
+  for (i in 1:n_stocks) {
+    shares[i] <- floor(investment * positions[i] / data$stock_prices[[i]][d])
+  }
+  
+  for (day in seq_along(data$stock_dates)[1:d]) {
+    daily_value <- 0
+    for (i in 1:n_stocks) {
+      daily_value <- daily_value + data$stock_prices[[i]][day] * shares[i]
+    }
+    port_value[[day]] <- daily_value
+  }
+
+  return(list(date = data$stock_dates[1:d],
+              portvalue = as.numeric(port_value[1:d]),
+              stock_shares = shares))
+}
+```
+
+##### Example
+
+#### winEstGBM
+
+```{r}
+# winEstGBM - Estimate parameters from history assuming process is GBM,
+# windowed estimation.
+# Args:
+#   prices = Vector of daily historical prices, from newest to oldest.
+#   windowLen = Length of window to use in estimation (in days).
+# Returns:
+#   rtn = log returns.
+#   mu = Estimates for drift.
+#   sigma = Estates for sigma.
+#   mubar = mean of log returns.
+#   sigmabar = standard deviation of log returns.
+
+# Rolling window GBM
+winEstGBM <- function(prices, windowLen) {
+  rtn <- -diff(log(prices))
+  rtnsq <- rtn * rtn
+  
+  w <- rep(1.0 / windowLen, windowLen)
+  
+  # Reversing the vectors using indexing
+  reversed_rtn <- rev(rtn)
+  mubar <- stats::filter(reversed_rtn, w, sides = 1)
+  mubar <- mubar[length(mubar):windowLen]
+  
+  reversed_rtnsq <- rev(rtnsq)
+  x2bar <- stats::filter(reversed_rtnsq, w, sides = 1)
+  x2bar <- x2bar[length(x2bar):windowLen]
+  
+  var <- x2bar - mubar^2
+  sigmabar <- sqrt(pmax(var, 0))
+  sigma <- sigmabar / sqrt(1 / 252)
+  mu <- mubar / (1 / 252) + (sigma^2) / 2
+  
+  return(list(rtn = rtn, mu = mu, sigma = sigma, mubar = mubar, sigmabar = sigmabar))
+}
+
+# Calculate Var and ES for undelying stocks instead of the portfolio
+# used for parametric_VaR
+winEstGBM2 <- function(prices, windowLen) {
+  rtn <- -diff(log(prices), differences = 1)
+  rtnsq <- rtn * rtn
+  
+  w <- rep(1.0 / windowLen, windowLen)
+  
+  # Reversing the vectors using indexing
+  reversed_rtn <- rtn[length(rtn):1]
+  mubar <- stats::filter(reversed_rtn, w, sides = 2)
+  mubar <- mubar[, length(mubar):windowLen]
+  
+  reversed_rtnsq <- rtnsq[length(rtnsq):1]
+  x2bar <- stats::filter(reversed_rtnsq, w, sides = 2)
+  x2bar <- x2bar[, length(x2bar):windowLen]
+  
+  var <- x2bar - mubar^2
+  sigmabar <- sqrt(pmax(var, 0))
+  sigma <- sigmabar / sqrt(1 / 252)
+  mu <- mubar / (1 / 252) + (sigma^2) / 2
+  
+  if (nrow(rtn) == 2) {
+    covarbar <- stats::filter(rtn[1, ] * rtn[2, ], w, sides = 2)
+    covarbar <- covarbar[length(covarbar):windowLen] - mubar[1, ] * mubar[2, ]
+    rho <- 252 * covarbar / (sigma[1, ] * sigma[2, ])
+  } else {
+    rho <- NA
+  }
+  
+  return(list(rtn = rtn, mu = mu, sigma = sigma, mubar = mubar, sigmabar = sigmabar, rho = rho))
+}
+```
+
+#### GBM VaR and ES
+
+```{r}
+# GBM calculation for VaR and ES
+gbmVaR <- function(v0, mu, sigma, p, t) {
+  # Compute the VaR of a portfolio that follows GBM.
+  # Args:
+  #   vO = Initial portfolio value.
+  #   mu = Drift.
+  #   sigma = Volatility.
+  #   P = Percentile at which to compute VaR.
+  #   t = Horizon at which to compute VaR (in years).
+  # Returns:
+  #   VaR = VaR of portfolio. Assumes portfolio follows GBM.
+  stdnormal_inv <- qnorm(1 - p, 0, 1)
+  VaR <- v0 - v0 * exp(sigma * sqrt(t) * stdnormal_inv + (mu - sigma^2 / 2) * t)
+  return(VaR)
+}
+
+gbmES <- function(v0, mu, sigma, p, t) {
+  # Compute the ES of a portfolio that follows GBM.
+  # Args:
+  #   vO = Initial portfolio value.
+  #   mu = Drift.
+  #   sigma = Volatility.
+  #   P = Percentile at which to compute VaR.
+  #   t = Horizon at which to compute VaR (in years).
+  # Returns:
+  #    = Expected shortfall of portfolio. Assumes portfolio follows GBM.
+
+  ES <- v0 * (1 - exp(mu * t) / (1 - p) * pnorm(qnorm(1 - p) - sqrt(t) * sigma))
+  ES
+}
+
+gbmESShort <- function(v0, mu, sigma, p, t) {
+  ES <- (-gbmES(v0, mu, sigma, 0.0, t) + p * gbmES(v0, mu, sigma, 1 - p, t)) / (1 - p)
+  ES
+}
+```
+
+#### parametric VaR and ES
+
+```{r}
+# Parameter calculation for VaR and ES
+parametricVaR <- function(a, s, mu, sigma, rho, p, t) {
+  # Compute the VaR of a portfolio of stocks that follow correlated GBMs
+  # by assuming the portfolio is normally distributed.
+
+  # Args:
+  #   a = Position vector (number of shares of each stock).
+  #   S = Initial stock price vector.
+  #   mu = Drift for each stock.
+  #   sigma = Volatility for each stock.
+  #   rho = Correlation matrix of driving Brownian motions.
+  #   p = Percentile at which to compute VaR.
+  #   t = Horizon at which to compute VaR (in years).
+  # Returns:
+  #   VaR = VaR calculated from mean and variances of porfolio.
+  #         Assumes portfolio is normally distributed.
+  #   vO = Current portfolio value.
+  #   evt = Expected value of portfolio at horizon.
+  #   evt2 = Expected value of square of portfolio value at horizon.
+  #   sdvt = Standard deviation of portfolio values at horizon.
+  covm <- sigma * t(rho) * sigma
+  as <- a * s
+  v0 <- sum(as)
+  evt <- as %*% exp(mu * t)
+  evt2 <- exp(mu * t) %*% (exp(covm * t) * (t(as) %*% as)) %*% exp(mu * t)
+  varvt <- evt2 - evt^2
+  sdvt <- sqrt(varvt)
+  VaR <- v0 - (evt + qnorm(1 - p) * sdvt)
+  return(list(VaR = VaR, v0 = v0, evt = evt, evt2 = evt2, sdvt = sdvt))
+}
+
+parametricES <- function(a, s, mu, sigma, rho, p, t) {
+  covm <- sigma * t(rho) * sigma
+  as <- a * s
+  v0 <- sum(as)
+  evt <- as %*% exp(mu * t)
+  evt2 <- exp(mu * t) %*% (exp(covm * t) * (t(as) %*% as)) %*% exp(mu * t)
+  varvt <- evt2 - evt^2
+  sdvt <- sqrt(varvt)
+  ES <- v0 - evt + sdvt * dnorm(qnorm(p)) / (1 - p)
+  return(list(ES = ES, v0 = v0, evt = evt, evt2 = evt2, sdvt = sdvt))
+}
+```
+
+#### Monte Carlo Simulation
+
+```{r}
+# Paths for Monte Carlo simulation
+gbmsampset <- function(n, dt, s0, mu, sigma, k) {
+  # Generates sample paths for specified GBM.
+  # Args: n, dt, so, mu, sigma, k
+  # Rtns: y
+  # Return k GBM sample paths, step size DT years, N samples starting at s0,
+  # with drift MU and vol SIGMA.
+  tv <- seq(0, n * dt, by = dt)
+  bmsamp <- bmsampset(n, dt, k)
+  y <- s0 * exp(sigma * bmsamp + (mu - sigma^2 / 2) * tv)
+  return(y)
+}
+
+bmsampset <- function(n, dt, k) {
+  # Args: n, dt, k
+  # Return k sample paths for brownian motion, N steps of size DT years.
+  y <- cbind(rep(0, k), matrix(cumsum(sqrt(dt) * matrix(rnorm(n * k), n, k)), ncol = k))
+  return(y)
+}
+```
+
+```{r}
+# Monte Carlo Simulation
+Monte_Carlo_VaR <- function(s0, mu, sigma, r, iv, strike, mat, stockShares, nputs, VaRp, horizon, npaths, option) {
+  st <- gbmsampset(1, horizon, s0, mu, sigma, npaths)[, 2]
+  vtStock <- st * stockShares
+  v0Stock <- s0 * stockShares
+  putt <- blackScholesPut(st, r, iv, strike, mat - horizon)
+  vtPut <- nputs * putt
+  put0 <- blackScholesOption(s0, r, iv, strike, mat, option)
+  v0Put <- nputs * put0
+  loss <- v0Stock + v0Put - (vtStock + vtPut)
+  VaR <- quantile(loss, VaRp)
+  VaR
+}
+```
+
+#### Black-Scholes equation
+
+```{r}
+# Black-Scholes equation
+blackScholesOption <- function(s0, r, sigma, k, t, option) {
+  sigrt <- 1 / (sigma * sqrt(t))
+  sig2 <- sigma^2 / 2
+  lsk <- log(s0 / k)
+  ert <- exp(-r * t)
+  d1 <- sigrt * (lsk + (r + sig2) * t)
+  d2 <- sigrt * (lsk + (r - sig2) * t)
+  
+  if (option == "put") {
+    price <- pnorm(-d2) * k * ert - pnorm(-d1) * s0
+  } else if (option == "call") {
+    price <- pnorm(d1) * s0 - pnorm(d2) * k * ert
+  } else {
+    stop("Invalid option type. Choose 'put' or 'call'.")
+  }
+  
+  price
+}
+```
+
+#### Back-testing Plot
+
+```{r}
+backtestVaRPlot <- function(dn, var, loss, name, prefix, doprint) {
+  # BACKTESTVARPLOT - Backtest VaR and plot results
+  # dn - dates
+  # var - VaR on given dates.
+  # loss - Losses for each date.
+  # name - Name of portfolio.
+  # prefix - prefix for output files.
+  # doprint - 1 to print, 0 to display.
+
+  # Plot VaR vs. Realized Losses
+  data <- data.frame(dn, var, loss)
+  
+  p <- ggplot(data, aes(x = as.Date(dn, format="%m/%d/%Y"))) +
+    geom_line(aes(y = var, color = "VaR"), size = 1.5) +
+    geom_line(aes(y = loss, color = "Losses"), size = 1.5) +
+    scale_color_manual(values = c("VaR" = "steelblue2", "Losses" = "tan1")) +
+    labs(x = "Date", y = "Value", title = sprintf('%s VaR vs Realized Losses', name)) +
+    theme_minimal() +
+    theme(legend.position = "top") +
+    scale_x_date(date_labels = "%m/%y", date_breaks = "1 month")
+    
+  if (doprint) {
+    print(p)
+  } else {
+    readline('Press Enter to continue...')
+  }
+
+}
+```
+
+### Calculation
+
+#### 1.1 GBM Portfolio VaR and ES, portfolio
+
+```{r}
+# Args:
+#   horizon is length of day/252
+GBM_port_VaRES <- function(data, portfolio, VaRp = 0.99, ESp = 0.975, v0, windowLen, horizon) {
+  print("Portfolio VaR and ES")
+  
+  plots <- list()
+  
+  # Loop through window lengths and calculate VaR & ES
+  for (i in seq_along(windowLen)) {
+    # winEstGBM calculation
+    port_win <- winEstGBM(portfolio$portvalue, windowLen[i] * 252)
+    
+    # Calculate VaR and ES
+    VaRs <- gbmVaR(v0, port_win$mu, port_win$sigma, VaRp, horizon)
+    ESs <- gbmES(v0, port_win$mu, port_win$sigma, ESp, horizon)
+    
+    Dates <- data$stock_dates[1:length(VaRs)]
+    
+    data_plot <- data.frame(Date = Dates, VaR = VaRs, ES = ESs)
+    
+    p <- ggplot(data_plot, aes(x = as.Date(Date, format="%m/%d/%Y"))) +
+      geom_line(aes(y = VaR), color = "steelblue2", size = 1, linetype = "solid") +
+      geom_line(aes(y = ES), color = "tan1", size = 1, linetype = "solid") +
+      labs(x = "Date",
+           y = "Value",
+           title = paste("Portfolio VaR and ES for ", windowLen[i], "yr window")) +
+      theme_minimal()
+
+    plots[[i]] <- p
+  }
+  
+  grid.arrange(grobs = plots, ncol = 1)
+
+}
+```
+
+##### Example
+
+```{r}
+GBM_port_VaRES(data, portfolio, 0.99, 0.975, v0, c(2, 5), 5/252)
+```
+
+#### 1.2 Portfolio VaR and ES, underlying stocks (parametric)
+
+```{r}
+param_VarES <- function(data, VaRp = 0.99, ESp = 0.975, windowLen, horizon) {
+  print("Parametric VaR and ES")
+  
+  plots <- list()
+  
+  datadt <- 1 / 252
+  maxnpts <- 3000
+  ndates <- length(data$stock_dates) - maxnpts
+  ncases <- length(windowLen)
+  
+  n_stocks <- length(data$stock_prices)
+  stock_rtn <- lapply(data$stock_prices, function(stock_price) -diff(log(stock_price)))
+
+  VaR <- matrix(0, nrow = ndates, ncol = ncases)
+  ES <- matrix(0, nrow = ndates, ncol = ncases)
+
+  stock_vol <- array(0, dim = c(ndates, ncases, n_stocks))
+  stock_drift <- array(0, dim = c(ndates, ncases, n_stocks))
+  aicorr <- array(0, dim = c(ndates, ncases, n_stocks, n_stocks))
+
+  for (i in 1:ndates) {
+    for (j in 1:ncases) {
+      npts <- windowLen[j] * 252
+
+      r_stocks <- lapply(stock_rtn, function(stock) stock[i:min(i+npts-1, length(stock))])
+      mubar_stocks <- sapply(r_stocks, mean)
+      sigbar_stocks <- sapply(r_stocks, sd)
+
+      stock_vol[i, j, ] <- sigbar_stocks / sqrt(datadt)
+      stock_drift[i, j, ] <- mubar_stocks / datadt + (stock_vol[i, j, ]^2) / 2
+
+      correlation_matrix <- cor(do.call(cbind, r_stocks))
+      aicorr[i, j, , ] <- correlation_matrix
+    }
+  }
+
+  stock_shares <- portfolio$stock_shares
+  pos <- matrix(unlist(stock_shares), nrow = 1)
+  
+  for (k in 1:ncases) {
+    # Creating separate lists for each case
+    case_VaR <- vector("list", ndates)
+    case_ES <- vector("list", ndates)
+    
+    for (i in 1:ndates) {
+      s0 <- sapply(data$stock_prices, function(stock) stock[i])
+      indexVal <- sum(pos * s0)
+      portPos <- pos / indexVal * 10000
+
+      mu <- stock_drift[i, k, ]
+      sigma <- stock_vol[i, k, ]
+      rho <- matrix(aicorr[i, k, , ], nrow = n_stocks, ncol = n_stocks)
+
+      result_VaR <- parametricVaR(portPos, s0, mu, sigma, rho, VaRp, horizon)
+      case_VaR[[i]] <- result_VaR[[1]]
+
+      result_ES <- parametricES(portPos, s0, mu, sigma, rho, ESp, horizon)
+      case_ES[[i]] <- result_ES[[1]]
+    }
+    
+    # Storing VaR and ES for each case
+    VaR[, k] <- unlist(case_VaR)
+    ES[, k] <- unlist(case_ES)
+    
+    # Creating plots for VaR and ES for each case
+    Dates <- data$stock_dates[1:length(VaR[, k])]
+    
+    data_plot <- data.frame(Date = Dates, VaR = VaR[, k], ES = ES[, k])
+    
+    p <- ggplot(data_plot, aes(x = as.Date(Date, format="%m/%d/%Y"))) +
+      geom_line(aes(y = VaR), color = "steelblue2", size = 1, linetype = "solid") +
+      geom_line(aes(y = ES), color = "tan1", size = 1, linetype = "solid") +
+      labs(x = "Date",
+           y = "Value",
+           title = paste("Parametric VaR and ES for ", windowLen[k], "yr window")) +
+      theme_minimal()
+
+    plots[[k]] <- p
+  }
+  
+  # Displaying all plots together
+  grid.arrange(grobs = plots, ncol = 1)
+}
+```
+
+##### Example
+
+```{r}
+param_VarES(data, 0.99, 0.975, c(2, 5), 5/252)
+```
+
+#### 2 Historical VaR and ES, relative change (daily log returns)
+
+```{r}
+hist_log_VaRES <- function(data, portfolio, VaRp = 0.99, ESp = 0.975, v0, horizon, windowSize) {
+  plots <- list()
+  
+  s0 <- v0
+  returnPeriod <- horizon * 252
+  
+  for (size in seq_along(windowSize)) {
+    npts <- 252 * windowSize[size]
+    npaths <- npts - returnPeriod
+    
+    ## Stock
+    ntrials_stock <- length(data$stock_dates) - npts
+    
+    for (i in seq_along(data$stock_prices)) {
+      # Results from GBM
+      stock_win <- winEstGBM(data$stock_prices[[i]], npts)
+      stock_VaR <- gbmVaR(s0, stock_win$mu, stock_win$sigma, VaRp, horizon)
+      
+      # Results from Historical data
+      stockLog <- log(data$stock_prices[[i]])
+      stockRtn <- stockLog[1:(length(stockLog) - returnPeriod)] - stockLog[(returnPeriod + 1):length(stockLog)]
+      stockRes <- 10000 * exp(stockRtn)
+      
+      stock_scenarios <- matrix(0, nrow = npaths, ncol = ntrials_stock)
+      
+      for (j in 1:ntrials_stock) {
+        stock_scenarios[, j] <- stockRes[j:(j + npaths - 1)]
+      }
+      
+      # Sort stock_scenarios along rows
+      stock_scenarios <- stock_scenarios[order(stock_scenarios[, 1]), ]
+      
+      # Create stock_results
+      stock_results <- matrix(0, nrow = ntrials_stock, ncol = 2)
+      stock_results[, 1] <- s0 - stock_scenarios[ceiling((1 - VaRp) * npaths), ]
+
+      # Calculate ES for each row
+      for (row in 1:ntrials_stock) {
+        stock_results[row, 2] <- s0 - mean(stock_scenarios[1:ceiling((1 - ESp) * npaths), ])
+      }
+      
+      # # Create and store plot for each stock
+      data_plot_stock <- data.frame(Date = data$stock_dates[1:ntrials_stock],
+                                    VaR = stock_results[, 1],
+                                    ES = stock_results[, 2])
+      p_stock <- ggplot(data_plot_stock, aes(x = as.Date(Date, format="%m/%d/%Y"))) +
+        geom_line(aes(y = VaR), color = "steelblue2", size = 1, linetype = "solid") +
+        geom_line(aes(y = ES), color = "tan1", size = 1, linetype = "solid") +
+        labs(x = "Date",
+             y = "Value",
+             title = paste("Stock", i, "VaR and ES for ", windowSize[size], ' yr Window Size')) +
+        theme_minimal()
+
+      plots[[paste("Stock", i, "_Window", size)]] <- p_stock
+    }
+    
+    ## Portfolio
+    # Results from GBM
+    port_win <- winEstGBM(portfolio$portvalue, npts)
+    port_VaR <- gbmVaR(s0, port_win$mu, port_win$sigma, VaRp, horizon)
+    
+    # Results from Historical data
+    ntrials_port <- length(portfolio$date) - npts
+    port_res <- matrix(0, nrow = npaths, ncol = 2)
+    
+    portLog <- log(portfolio$portvalue)
+    portRtn <- portLog[1:(length(portLog) - returnPeriod)] - portLog[(returnPeriod + 1):length(portLog)]
+    portRes <- 10000 * exp(portRtn)
+    
+    port_scenarios <- matrix(0, nrow = npaths, ncol = ntrials_port)
+    
+    for (j in 1:ntrials_port) {
+      port_scenarios[, j] <- portRes[j:(j + npaths - 1)]
+    }
+    
+    port_scenarios <- port_scenarios[order(port_scenarios[, 1]), ]
+    
+    # Create port_results
+    port_results <- matrix(0, nrow = ntrials_port, ncol = 2)
+    port_results[, 1] <- s0 - port_scenarios[ceiling((1 - VaRp) * npaths), ]
+    
+    # Calculate ES for each row
+    for (row in 1:ntrials_port) {
+      port_results[row, 2] <- s0 - mean(port_scenarios[1:ceiling((1 - ESp) * npaths), ])
+    }
+    
+    # Create and store plot for portfolio
+    data_plot_port <- data.frame(Date = portfolio$date[1:ntrials_port],
+                                 VaR = port_results[, 1],
+                                 ES = port_results[, 2])
+    p_port <- ggplot(data_plot_port, aes(x = as.Date(Date, format="%m/%d/%Y"))) +
+      geom_line(aes(y = VaR), color = "steelblue2", size = 1, linetype = "solid") +
+      geom_line(aes(y = ES), color = "tan1", size = 1, linetype = "solid") +
+      labs(x = "Date",
+           y = "Value",
+           title = paste("Portfolio Historical VaR and ES for ", windowSize[size], ' yr Window Size')) +
+      theme_minimal()
+
+    plots[[paste("Portfolio_Window", size)]] <- p_port
+  }
+
+  # grid.arrange(grobs = plots, ncol = 1)
+  return(list(stock_results))
+}
+```
+
+#### 3 Monte Carlo VaR, portfolio
+
+```{r}
+MC_VaRES <- function(portfolio, VaRp = 0.99, ESp = 0.975, v0, horizon = 5/252, windowSizes) {
+  plots <- list()
+  
+  s0 <- v0
+  
+  for (size in windowSizes) {
+    npts <- 252 * size
+    ntrials <- length(portfolio$date) - npts
+    npaths <- 10000
+    
+    # GBM VaR and ES for the portfolio
+    port_win <- winEstGBM(portfolio$portvalue, npts)
+    port_VaR <- gbmVaR(s0, port_win$mu, port_win$sigma, VaRp, horizon)
+    
+    # Initialize p1
+    p1 <- matrix(0, nrow = npaths, ncol = ntrials)
+    
+    # Loop through trials
+    for (i in 1:ntrials) {
+      p <- gbmsampset(1, horizon, s0, port_win$mu[i], port_win$sigma[i], npaths)
+      
+      p1[, i] <- p[, 2]
+      
+      # A little output so we know the progress of the loop if it's very time-consuming
+      if (i %% 1000 == 0) {
+        cat(i, "\n")
+      }
+    }
+    
+    # Results of the Monte Carlo VaR and ES
+    p2 <- apply(p1, 2, sort)
+    r1 <- matrix(0, nrow = ntrials, ncol = 4)
+    r1[, 1] <- colMeans(p1)
+    r1[, 2] <- apply(p1, 2, sd)
+    r1[, 3] <- s0 - p2[ceiling((1 - VaRp) * npaths), ]
+    r1[, 4] <- s0 - colMeans(p2[1:ceiling((1 - ESp) * npaths), ])
+    
+    # Plotting
+    data_plot <- data.frame(Date = portfolio$date[1:ntrials],
+                            VaR = r1[, 3],
+                            ES = r1[, 4])
+
+    p_plot <- ggplot(data_plot, aes(x = as.Date(Date, format="%m/%d/%Y"))) +
+      geom_line(aes(y = VaR), color = "steelblue2", size = 1, linetype = "solid") +
+      geom_line(aes(y = ES), color = "tan1", size = 1, linetype = "solid") +
+      labs(x = "Date",
+           y = "Value",
+           title = paste("Monte Carlo VaR and ES")) +
+      theme_minimal()
+
+    plots[[paste("Window", size)]] <- list(plot = p_plot, results = r1)
+  }
+  
+  grid.arrange(grobs = lapply(plots, function(x) x$plot), ncol = 1)
+}
+```
+
+```{r, warning=FALSE}
+# MC_VaRES(portfolio, 0.99, 0.975, v0, 5/252, c(5))
+```
+
+#### 4 Backtesting
+
+```{r}
+library(zoo)
+
+backtestVaR <- function(stock_files, option_files, date, positions, VaRp = 0.99, ESp = 0.975, investment, windowSize, horizon = 5/252, doprint) {
+  # Step 0: Parameters
+  dataDaysdt <- 1
+  horiz_step <- horizon * 252 / dataDaysdt
+  
+  # Step 1
+  data <- load_prices(stock_files, option_files)
+  n_stocks <- length(data$stock_prices)
+  
+  # Step 2
+  portfolio <- form_portfolio(date, positions, investment, data)
+  s0 <- portfolio$portvalue[[length(portfolio$portvalue)]] # find initial positions in stocks
+  port <- portfolio$portvalue
+  
+  # Calculate STOCK parameters
+  for (size in seq_along(windowSize)) {
+    windowLenDays <- 252 * windowSize[size]
+    dn <- data$stock_dates
+    
+    for (i in seq_along(data$stock_prices)) {
+      # Results from winEstGBM
+      stock_price <- data$stock_prices[[i]]
+      stock_win <- winEstGBM(stock_price, windowLenDays)
+      
+      # Compute VaRs assuming GBM
+      long_stock_gbmVaR <- gbmVaR(s0, stock_win$mu, stock_win$sigma, VaRp, horizon)
+      nvars <- length(long_stock_gbmVaR)
+      long_stock_sharechange <- head(stock_price, -(1 + horiz_step)) / tail(stock_price, -horiz_step)
+      long_stock_loss <- s0 - long_stock_sharechange * s0
+      
+      short_stock_gbmVaR <- -gbmVaR(s0, stock_win$mu, stock_win$sigma, 1 - VaRp, horizon)
+      short_stock_loss <- long_stock_sharechange * s0 - s0
+      
+      # Align
+      npts <- length(long_stock_gbmVaR) - horiz_step
+      dn <- dn[(1 + horiz_step):npts]
+      long_stock_gbmVaR <- long_stock_gbmVaR[(1 + horiz_step):npts]
+      short_stock_gbmVaR <- short_stock_gbmVaR[(1 + horiz_step):npts]
+      long_stock_loss <- long_stock_loss[1:(npts - horiz_step)]
+      short_stock_loss <- short_stock_loss[1:(npts - horiz_step)]
+      
+      # Plot the results
+      backtestVaRPlot(dn, long_stock_gbmVaR, long_stock_loss, paste0('Long Stock', i), 'long_stock', doprint)
+      backtestVaRPlot(dn, short_stock_gbmVaR, short_stock_loss, paste0('Short Stock', i), 'short_stock', doprint)
+    }
+    
+    # Calculate PORT parameters
+    port_price <- portfolio$portvalue
+    port_win <- winEstGBM(portfolio$portvalue, windowLenDays)
+    
+    long_port_gbmVaR <- gbmVaR(s0, port_win$mu, port_win$sigma, VaRp, horizon)
+    nvars_port <- length(long_port_gbmVaR)
+    long_port_sharechange <- head(port_price, -(1 + horiz_step)) / tail(port_price, -horiz_step)
+    long_port_loss <- s0 - long_port_sharechange * s0
+    
+    short_port_gbmVaR <- -gbmVaR(s0, port_win$mu, port_win$sigma, 1 - VaRp, horizon)
+    short_port_loss <- long_port_sharechange * s0 - s0
+    
+    # Align
+    npts <- length(long_port_gbmVaR) - horiz_step
+    dn_port <- portfolio$date
+    dn_port <- dn_port[(1 + horiz_step):npts]
+    long_port_gbmVaR <- long_port_gbmVaR[(1 + horiz_step):npts]
+    short_port_gbmVaR <- short_port_gbmVaR[(1 + horiz_step):npts]
+    long_port_loss <- long_port_loss[1:(npts - horiz_step)]
+    short_port_loss <- short_port_loss[1:(npts - horiz_step)]
+    
+    # Plot the results
+    backtestVaRPlot(dn_port, long_port_gbmVaR, long_port_loss, 'Long Portfolio', 'long_port', doprint)
+    backtestVaRPlot(dn_port, short_port_gbmVaR, short_port_loss, 'Short Portfolio', 'short_port', doprint)
+  }
+}
+```
+
+##### Example
+
+```{r, warning=FALSE}
+backtestVaR(stock_files, option_files, date = '01/02/1996', positions = c(0.48, 0.48, 0.04), VaRp = 0.99, ESp = 0.975, investment = 10000, windowSize = c(2, 5), horizon = 5/252, doprint = 1)
+```
